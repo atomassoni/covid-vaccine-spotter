@@ -1,0 +1,4 @@
+#!/usr/bin/env node
+
+const { get } = require("../src/providers/cub/auth");
+get();
