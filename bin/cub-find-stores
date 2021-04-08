@@ -1,4 +1,4 @@
 #!/usr/bin/env node
 
-const { findStores } = require("../src/providers/cub/stores");
-findStores();
+const { importStores } = require("../src/providers/Cub/Stores");
+importStores();

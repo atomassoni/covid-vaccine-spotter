@@ -1,13 +1,15 @@
 // const got = require("got");
-
 const HumanizePlugin = require('@extra/humanize');
 const { firefox } = require("playwright-extra");
 const { PlaywrightBlocker } = require("@cliqz/adblocker-playwright");
+const sleep = require("sleep-promise");
+const random = require("lodash");
+
 // const retry = require("p-retry");
 const fetch = require('cross-fetch')
+const CubLogin = require('./Auth')
 
 const { Store } = require("../../models/Store");
-const { Provider } = require("../../models/Provider");
 const { ProviderBrand } = require("../../models/ProviderBrand");
 
 const logger = require("../../logger");
@@ -21,40 +23,28 @@ firefox.use(
   })
 );
 
-class CubStores {
-  static async getStores() {
-    CubStores.importedStores = {};
-    const knex = Store.knex();
-    const grid = await knex
-      .select(
-        knex.raw(
-          "id, centroid_postal_code, st_y(centroid_location::geometry) AS latitude, st_x(centroid_location::geometry) AS longitude"
-        )
-      )
-      .from("country_grid_220km")
-      .orderBy("centroid_postal_code");
-    const count = grid.length;
-    for (const [index, gridCell] of grid.entries()) {
-      logger.info(
-        `Importing stores for ${gridCell.centroid_postal_code} (${gridCell.latitude
-        },${gridCell.longitude}) (${index + 1} of ${count})...`
-      );
+class Stores {
+  
+  static async findStores() {
+    Stores.providerBrands = {
+      cub: await ProviderBrand.query()
+        .insert({
+          provider_id: "cub",
+          key: "cub",
+          name: "Cub Foods",
+          url: "https://www.cub.com/pharmacy/services/covid-testing-information.html",
+        })
+        .onConflict(["provider_id", "key"])
+        .merge(),
 
-      const resp = await CubStores.findStores(gridCell);
-
-      if (resp.body.data.length >= 200) {
-        logger.error(
-          `There may be more stores within the 100 mile radius than returned, since the maximum of 200 stores was returned: ${gridCell.centroid_postal_code}. Check manually or implement smaller grid search.`
-        );
-      }
     }
-
+    await Stores.importStores();
     await Store.knex().destroy();
   }
 
 
-  static async findStores() {
-    CubStores.importedStores = {}
+  static async importStores() {
+    Stores.importedStores = {}
 
     const browser = await firefox.launch({
       headless: true
@@ -105,23 +95,40 @@ class CubStores {
         }
       }).filter(s => s && s.brand_id && s.isPharmacy))
     logger.info('cub json', json)
+    CubLogin.appointmentSubscribe((appointment)=> {
+      logger.debug('appointments', JSON.stringify(appointment, null, 2))
+    })
+    const getAuth = await CubLogin.get()
+    await sleep(random(2500, 3000));
+
+    const newpage = getAuth.page
+    const zips = new Set(json.map(store => store.postal_code))
+    // todo: either check each store or go down the list for each zip so we find everything
+    for (const zip of zips) {
+      await sleep(random(1500, 2750));
+
+      await newpage.goto(`https://svu.marketouchmedia.com/SVUSched/program/program1987/Patient/Schedule?zip=${zip}&appointmentType=5947`,
+        {
+          waitUntil: 'networkidle',
+        });
+    }
     await browser.close();
 
-    for (const store of json) {
-      delete store.isPharmacy;
-      if (CubStores.importedStores[store.brand_id]) {
-        logger.info(`  Skipping already imported store ${store.brand_id}`);
-      } else {
-        logger.info(`  Importing store ${store.brand_id}`);
-        await Store.query()
-          .insert(store)
-          .onConflict(["brand", "brand_id"])
-          .merge();
-        CubStores.importedStores[store.brand_id] = true;
-      }
-    }
+    // for (const store of json) {
+    //   delete store.isPharmacy;
+    //   if (Stores.importedStores[store.brand_id]) {
+    //     logger.info(`  Skipping already imported store ${store.brand_id}`);
+    //   } else {
+    //     logger.info(`  Importing store ${store.brand_id}`);
+    //     await Store.query()
+    //       .insert(store)
+    //       .onConflict(["brand", "brand_id"])
+    //       .merge();
+    //     Stores.importedStores[store.brand_id] = true;
+    //   }
+    // }
 
     return json;
   }
 }
-module.exports = CubStores;
+module.exports = Stores;

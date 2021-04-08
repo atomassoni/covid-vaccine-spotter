@@ -18,7 +18,6 @@ firefox.use(
 );
 
 class CubAuth {
-
   static async get() {
     if (CubAuth.auth) {
       return CubAuth.auth;
@@ -63,28 +62,58 @@ class CubAuth {
 
     await CubAuth.newPage();
 
+
     CubAuth.page.on('request', (request) => {
       logger.info('>>', request.method(), request.url())
-      if(request.url().includes('CheckZipCode')){
+      if (request.url().includes('CheckZipCode')) {
         logger.error('no appointments for zip')
       }
-      if(request.url().includes('PatientCalendar')) {
-        logger.debug('yay', request.content())
+      if (request.url().includes('PatientCalendar')) {
+        // logger.debug('yay', request.content())
       }
-      if(request.url().includes('calendar.js')) {
-        loggedIn=true
+      if (request.url().includes('calendar.js')) {
+        loggedIn = true
       }
-      if(request.url().includes('Loggedout')) {
-        loggedIn=false
+      if (request.url().includes('Loggedout')) {
+        loggedIn = false
       }
     })
 
-    CubAuth.page.on('response', (response) => {
+    CubAuth.page.on('response', async (response) => {
       logger.info('<<', response.status(), response.url())
-      if(response.url().includes('PatientCalendar')) {
-        logger.debug('yay', response.content())
+      if (response.url().startsWith('https://svu.marketouchmedia.com/SVUSched/program/program1987/Patient/Schedule?zip')) {
+        CubAuth.setTemp({})
+      }
+      if (response.url().includes('PatientCalendarDay')) {
+        const appointmentListJson = await response.json()
+        const appointments = this.getAppointments(appointmentListJson)
+        CubAuth.setAppointments(appointments)
+        CubAuth.setTemp({ ...CubAuth.tempData })
+        CubAuth.setData({ ...CubAuth.tempData })
+        CubAuth.matchThisStoreAndGoToNext(CubAuth.page)
+
+      }
+      if (response.url().includes('PatientCalendar')) {
+        const calendar = await response.json()
+        const dayData = this.getActiveDays(calendar)
+        CubAuth.setTemp({ ...CubAuth.tempData, activeDays: dayData })
+        CubAuth.setData({ ...CubAuth.tempData, activeDays: dayData })
+        if (dayData?.days) {
+          for (const day of dayData.days) {
+            await sleep(random(250, 750));
+            await CubAuth.page.click(`[id='${day}']`);
+            await CubAuth.page.waitForSelector('#dialog-schedule-appointment');
+          }
+        }
+      }
+
+      if (response.url().includes('GetInfo')) {
+        const store = await response.json()
+        CubAuth.setTemp({ ...store, activeDays: CubAuth.tempData?.activeDays })
+        CubAuth.setData({ ...store, activeDays: CubAuth.tempData?.activeDays })
       }
     })
+    await sleep(random(250, 750));
 
     CubAuth.page = await CubAuth.login(CubAuth.page)
     await sleep(random(250, 750));
@@ -99,7 +128,7 @@ class CubAuth {
     const auth = { context: CubAuth.context, page: CubAuth.page }
     logger.info("Setting auth...");
     CubAuth.set(auth);
-    logger.info("Finished auth refresh => loggedIn: ", loggedIn );
+    logger.info("Finished auth refresh => loggedIn: ", loggedIn);
     return auth
   }
 
@@ -114,7 +143,7 @@ class CubAuth {
 
     logger.info("Waiting for buttons...");
 
-    await page.waitForSelector('#zip-input');
+    await page.waitForSelector('#zip-input', { timeout: 180000 });
     await page.waitForLoadState("networkidle");
     await sleep(random(250, 750));
     await page.click('#zip-input');
@@ -131,30 +160,67 @@ class CubAuth {
     CubAuth.auth = auth;
   }
 
-  static async moveCursor() {
-    logger.info("move cursor");
-    if (!CubAuth.page || CubAuth.page.isClosed()) {
-      CubAuth.moveCursorTimeout = setTimeout(
-        CubAuth.moveCursor,
-        random(250, 750)
-      );
-      return;
+  static async setData(data) {
+    if (!CubAuth.data) {
+      CubAuth.data = {}
     }
-
-    if (CubAuth.page && (await CubAuth.page.isVisible("#sec-overlay"))) {
-      CubAuth.moveCursorTimeout = setTimeout(
-        CubAuth.moveCursor,
-        random(250, 750)
-      );
-      logger.info("OVERLAY! SKIPPING!");
-      return;
-    }
-
-    CubAuth.moveCursorTimeout = setTimeout(
-      CubAuth.moveCursor,
-      random(250, 750)
-    );
+    CubAuth.data[data.FacilityId] = data
   }
-}
 
+  static async setTemp(data) {
+
+    CubAuth.tempData = data
+  }
+
+  static setAppointments(data) {
+    if (!CubAuth.tempData) {
+      CubAuth.tempData = {}
+    }
+    if (!CubAuth.tempData.appointments) {
+      CubAuth.tempData.appointments = {}
+    }
+    if (data.Data) {
+      CubAuth.tempData.appointments[data.Data.Date] = data
+      if (CubAuth.appointment) {
+        CubAuth.appointment({ ...CubAuth.tempData, date: data.Data.Date, times: data.Data.Rows })
+      }
+    }
+
+  }
+
+  static getActiveDays(calendarJson) {
+    const { Year: year, Days, Month: month } = calendarJson?.Data ?? {}
+    if (Days) {
+      const days = Days?.map(day => day && day.Available && day.DayNumber ? day.DayNumber : 0).filter(activeDay => activeDay)
+      return { days, year, month }
+    }
+    return null
+  }
+
+  static getAppointments(appointmentListJson) {
+    const { Rows } = appointmentListJson?.Data ?? {}
+    if (Rows) {
+      return appointmentListJson
+    }
+    return null
+  }
+
+  static appointmentSubscribe(result) {
+    CubAuth.appointment = result
+  }
+
+  static async matchThisStoreAndGoToNext(page) {
+    const selector = '#facility option'
+    const availableStores = await page.$$eval(selector, nodes =>
+      nodes.map((node, i) => {
+        if (!node) {
+          return {}
+        }
+        return {facilityId: node.getAttribute('value'), order: i}
+      })
+    )
+      const foundThisStore = availableStores?.find(store=>CubAuth.tempData.FacilityId === store.facilityId)
+      console.log('click on next?', availableStores?.find(store=>store.order === foundThisStore?.order + 1))
+    }
+  }
 module.exports = CubAuth;
